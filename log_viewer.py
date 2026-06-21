@@ -10,8 +10,30 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFileDialog,
     QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit,
     QListWidget, QPlainTextEdit, QTextEdit, QLabel, QComboBox, QSplitter, QProgressBar,
-    QCheckBox, QListWidgetItem
+    QCheckBox, QListWidgetItem, QTabWidget
 )
+
+
+def read_log(path):
+    path = Path(path)
+    if path.suffix == ".gz":
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
+            return f.readlines()
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.readlines()
+
+
+def matches(line, text, mode, case_sensitive, pattern=None):
+    if not text:
+        return True
+    if mode == "Regular expression":
+        return bool(pattern.search(line))
+
+    haystack = line if case_sensitive else line.lower()
+    needle = text if case_sensitive else text.lower()
+    if mode == "Exact line":
+        return haystack.rstrip("\r\n") == needle
+    return needle in haystack
 
 
 class LogLoader(QObject):
@@ -24,14 +46,7 @@ class LogLoader(QObject):
 
     def run(self):
         try:
-            if self.path.suffix == ".gz":
-                with gzip.open(self.path, "rt", encoding="utf-8", errors="replace") as f:
-                    lines = f.readlines()
-            else:
-                with open(self.path, "r", encoding="utf-8", errors="replace") as f:
-                    lines = f.readlines()
-
-            self.finished.emit(lines)
+            self.finished.emit(read_log(self.path))
 
         except Exception as e:
             self.failed.emit(str(e))
@@ -116,6 +131,20 @@ class LogHighlighter(QSyntaxHighlighter):
         self.rehighlight()
 
 
+class LogOutput(QPlainTextEdit):
+    stack_arrow_clicked = Signal(int)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            cursor = self.cursorForPosition(event.position().toPoint())
+            text = cursor.block().text()
+            if text.endswith((" ▼", " ▲")) and cursor.positionInBlock() >= len(text) - 2:
+                self.stack_arrow_clicked.emit(cursor.blockNumber())
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
+
+
 class LogViewer(QMainWindow):
     FIRST_LOG_BLOCK = 4
 
@@ -123,14 +152,17 @@ class LogViewer(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("Log Viewer")
-        self.setWindowIcon(QIcon(str(asset_path("minecraft-log-viewer.ico"))))
+        self.setWindowIcon(QIcon(str(asset_path("log-viewer.ico"))))
         self.resize(1200, 750)
 
         self.current_lines = []
         self.log_files = []
+        self.log_cache = {}
         self.loading_threads = []
         self.current_log_path = None
         self.displayed_lines = []
+        self.stack_blocks = {}
+        self.expanded_stacks = set()
         self.pending_bookmark = None
         self.flash_generation = 0
         self.line_selection = None
@@ -153,6 +185,9 @@ class LogViewer(QMainWindow):
 
         self.case_sensitive = QCheckBox("Case sensitive")
         self.error_summary_toggle = QCheckBox("Error summary")
+        self.fold_stacks = QCheckBox("Fold stacks")
+        self.fold_stacks.setChecked(True)
+        self.search_all_btn = QPushButton("Search all")
 
         self.level_filter = QComboBox()
         self.level_filter.addItems(["All", "INFO", "WARN", "ERROR", "DEBUG"])
@@ -165,6 +200,8 @@ class LogViewer(QMainWindow):
         top_bar.addWidget(self.search_mode)
         top_bar.addWidget(self.case_sensitive)
         top_bar.addWidget(self.error_summary_toggle)
+        top_bar.addWidget(self.fold_stacks)
+        top_bar.addWidget(self.search_all_btn)
 
         layout.addLayout(top_bar)
 
@@ -178,28 +215,50 @@ class LogViewer(QMainWindow):
 
         self.file_list = QListWidget()
         left_layout.addWidget(QLabel("Log files"))
-        left_layout.addWidget(self.file_list, 2)
+        left_layout.addWidget(self.file_list, 1)
 
+        self.side_tabs = QTabWidget()
+
+        bookmarks = QWidget()
+        bookmark_layout = QVBoxLayout(bookmarks)
+        bookmark_layout.setContentsMargins(4, 4, 4, 4)
         bookmark_bar = QHBoxLayout()
         self.add_bookmark_btn = QPushButton("Bookmark selected")
         self.remove_bookmark_btn = QPushButton("Remove")
         bookmark_bar.addWidget(self.add_bookmark_btn)
         bookmark_bar.addWidget(self.remove_bookmark_btn)
-        left_layout.addWidget(QLabel("Bookmarks"))
-        left_layout.addLayout(bookmark_bar)
+        bookmark_layout.addLayout(bookmark_bar)
 
         self.bookmark_list = QListWidget()
         self.bookmark_list.setWordWrap(True)
         self.bookmark_list.setTextElideMode(Qt.TextElideMode.ElideNone)
-        left_layout.addWidget(self.bookmark_list, 1)
+        bookmark_layout.addWidget(self.bookmark_list)
 
-        self.log_output = QPlainTextEdit()
+        timeline = QWidget()
+        timeline_layout = QVBoxLayout(timeline)
+        timeline_layout.setContentsMargins(4, 4, 4, 4)
+        self.timeline_list = QListWidget()
+        timeline_layout.addWidget(self.timeline_list)
+
+        results = QWidget()
+        results_layout = QVBoxLayout(results)
+        results_layout.setContentsMargins(4, 4, 4, 4)
+        self.search_results = QListWidget()
+        results_layout.addWidget(self.search_results)
+
+        self.side_tabs.addTab(bookmarks, "Bookmarks")
+        self.side_tabs.addTab(timeline, "Timeline")
+        self.side_tabs.addTab(results, "Results")
+        left_layout.addWidget(self.side_tabs, 2)
+
+        self.log_output = LogOutput()
         self.log_output.setReadOnly(True)
         log_font = QFont("Consolas")
         log_font.setPointSize(10)
         self.log_output.setFont(log_font)
         self.log_highlighter = LogHighlighter(self.log_output.document())
         self.log_output.cursorPositionChanged.connect(self.update_selection)
+        self.log_output.stack_arrow_clicked.connect(self.toggle_stack_at)
 
         self.splitter.addWidget(left_panel)
         self.splitter.addWidget(self.log_output)
@@ -228,9 +287,13 @@ class LogViewer(QMainWindow):
         self.case_sensitive.toggled.connect(self.render_log)
         self.level_filter.currentTextChanged.connect(self.render_log)
         self.error_summary_toggle.toggled.connect(self.render_log)
+        self.fold_stacks.toggled.connect(self.render_log)
+        self.search_all_btn.clicked.connect(self.search_all_logs)
         self.add_bookmark_btn.clicked.connect(self.add_bookmark)
         self.remove_bookmark_btn.clicked.connect(self.remove_selected_bookmark)
         self.bookmark_list.itemClicked.connect(self.go_to_bookmark)
+        self.timeline_list.itemClicked.connect(self.go_to_timeline)
+        self.search_results.itemClicked.connect(self.go_to_search_result)
 
     def open_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -282,6 +345,14 @@ class LogViewer(QMainWindow):
 
         path = self.log_files[index]
         self.current_log_path = path
+        self.expanded_stacks = set()
+
+        if path in self.log_cache:
+            self.current_lines = self.log_cache[path]
+            self.find_stack_blocks()
+            self.update_timeline()
+            self.render_log()
+            return
 
         self.status.setText(f"Reading {path.name}...")
         self.log_output.setPlainText("Loading log file...")
@@ -327,6 +398,9 @@ class LogViewer(QMainWindow):
 
     def on_log_loaded(self, lines):
         self.current_lines = lines
+        self.log_cache[self.current_log_path] = lines
+        self.find_stack_blocks()
+        self.update_timeline()
         self.status.setText(f"Rendering {len(lines)} lines...")
         self.render_log()
 
@@ -335,6 +409,76 @@ class LogViewer(QMainWindow):
         self.log_output.setPlainText(f"Failed to read file:\n{error}")
         self.status.setText("Failed to load log file.")
         self.loading_indicator.hide()
+
+    def find_stack_blocks(self):
+        self.stack_blocks = {}
+        index = 0
+        while index < len(self.current_lines) - 1:
+            line = self.current_lines[index]
+            lower = line.lower()
+            if not any(word in lower for word in ("error", "severe", "exception", "throwable")):
+                index += 1
+                continue
+
+            probe_end = min(index + 9, len(self.current_lines))
+            has_stack_frame = any(
+                self.current_lines[probe].lstrip().startswith("at ")
+                for probe in range(index + 1, probe_end)
+            )
+            if has_stack_frame:
+                end = index + 1
+                while end < len(self.current_lines):
+                    if re.match(r"^\[\d{2}:\d{2}:\d{2}\] \[", self.current_lines[end]):
+                        break
+                    end += 1
+                self.stack_blocks[index] = end
+                index = end
+            else:
+                index += 1
+
+    def update_timeline(self):
+        self.timeline_list.clear()
+        if self.current_log_path is None:
+            return
+
+        stack_lines = {
+            index
+            for start, end in self.stack_blocks.items()
+            for index in range(start + 1, end)
+        }
+        for index, line in enumerate(self.current_lines):
+            if index in stack_lines:
+                continue
+            lower = line.lower()
+            if "starting minecraft server" in lower or "starting net.minecraft.server" in lower:
+                event = "Server starting"
+            elif "done (" in lower:
+                event = "Server ready"
+            elif "stopping server" in lower or "stopping the server" in lower:
+                event = "Server stopping"
+            elif "watchdog" in lower:
+                event = "Watchdog"
+            elif "could not pass event" in lower:
+                event = "Plugin event failure"
+            elif "plugin" in lower and ("failed to load" in lower or "could not load" in lower):
+                event = "Plugin load failure"
+            elif any(word in lower for word in ("crash", "crashed", "fatal error", "outofmemoryerror")):
+                event = "Crash"
+            elif "severe" in lower:
+                event = "Severe"
+            elif "error" in lower or "exception" in lower:
+                event = "Error"
+            elif "warn" in lower:
+                event = "Warning"
+            else:
+                continue
+
+            item = QListWidgetItem(f"{index + 1}: {event} — {line.strip()}")
+            item.setData(Qt.ItemDataRole.UserRole, {
+                "path": str(self.current_log_path),
+                "line_index": index,
+            })
+            self.timeline_list.addItem(item)
 
     def add_bookmark(self):
         cursor = self.log_output.textCursor()
@@ -348,7 +492,12 @@ class LogViewer(QMainWindow):
             self.status.setText("Select a log line before adding a bookmark.")
             return
 
-        source_index = self.displayed_lines[displayed_index]
+        block = self.displayed_lines[displayed_index]
+        if block["fold"] is not None:
+            self.status.setText("Expand the stack trace before bookmarking a line in it.")
+            return
+
+        source_index = block["source"]
         line = self.current_lines[source_index].rstrip("\r\n")
         item = QListWidgetItem(line)
         item.setToolTip(line)
@@ -364,8 +513,31 @@ class LogViewer(QMainWindow):
         if row >= 0:
             self.bookmark_list.takeItem(row)
 
+    def toggle_stack_at(self, block_number):
+        displayed_index = block_number - self.FIRST_LOG_BLOCK
+        if displayed_index < 0 or displayed_index >= len(self.displayed_lines):
+            return
+
+        start = self.displayed_lines[displayed_index]["fold"]
+        if start is None:
+            return
+        if start in self.expanded_stacks:
+            self.expanded_stacks.remove(start)
+        else:
+            self.expanded_stacks.add(start)
+        self.render_log()
+
     def go_to_bookmark(self, item):
-        self.pending_bookmark = item.data(Qt.ItemDataRole.UserRole)
+        self.open_line(item.data(Qt.ItemDataRole.UserRole))
+
+    def go_to_timeline(self, item):
+        self.open_line(item.data(Qt.ItemDataRole.UserRole))
+
+    def go_to_search_result(self, item):
+        self.open_line(item.data(Qt.ItemDataRole.UserRole))
+
+    def open_line(self, line_info):
+        self.pending_bookmark = line_info
 
         self.search_box.blockSignals(True)
         self.level_filter.blockSignals(True)
@@ -377,12 +549,12 @@ class LogViewer(QMainWindow):
         self.level_filter.blockSignals(False)
         self.error_summary_toggle.blockSignals(False)
 
-        bookmark_path = Path(self.pending_bookmark["path"])
-        if bookmark_path != self.current_log_path:
+        log_path = Path(self.pending_bookmark["path"])
+        if log_path != self.current_log_path:
             try:
-                self.file_list.setCurrentRow(self.log_files.index(bookmark_path))
+                self.file_list.setCurrentRow(self.log_files.index(log_path))
             except ValueError:
-                self.status.setText("The bookmarked log file is no longer available.")
+                self.status.setText("The log file is no longer available.")
                 self.pending_bookmark = None
         else:
             self.render_log()
@@ -394,8 +566,20 @@ class LogViewer(QMainWindow):
             return
 
         source_index = self.pending_bookmark["line_index"]
+        for start, end in self.stack_blocks.items():
+            if start <= source_index < end:
+                self.expanded_stacks.add(start)
+                break
+
+        if any(block["source"] == source_index for block in self.displayed_lines) is False:
+            self.render_log()
+            return
+
         try:
-            displayed_index = self.displayed_lines.index(source_index)
+            displayed_index = next(
+                index for index, block in enumerate(self.displayed_lines)
+                if block["source"] == source_index
+            )
         except ValueError:
             self.status.setText("The bookmarked line is not in the current view.")
             self.pending_bookmark = None
@@ -446,7 +630,60 @@ class LogViewer(QMainWindow):
         ]
         self.log_output.setExtraSelections(selections)
 
+    def search_all_logs(self):
+        search = self.search_box.text()
+        if not search:
+            self.status.setText("Enter search text before searching all logs.")
+            return
+
+        mode = self.search_mode.currentText()
+        case_sensitive = self.case_sensitive.isChecked()
+        try:
+            pattern = re.compile(search, 0 if case_sensitive else re.IGNORECASE) \
+                if mode == "Regular expression" else None
+        except re.error as error:
+            self.status.setText(f"Invalid regular expression: {error}")
+            return
+
+        self.search_results.clear()
+        count = 0
+        limit = 2000
+        for path in self.log_files:
+            try:
+                lines = self.log_cache.get(path)
+                if lines is None:
+                    lines = read_log(path)
+                    self.log_cache[path] = lines
+            except OSError as error:
+                self.status.setText(f"Could not read {path.name}: {error}")
+                continue
+
+            for line_number, line in enumerate(lines):
+                if not matches(line, search, mode, case_sensitive, pattern):
+                    continue
+                item = QListWidgetItem(f"{path.name}:{line_number + 1}  {line.strip()}")
+                item.setToolTip(line.rstrip("\r\n"))
+                item.setData(Qt.ItemDataRole.UserRole, {
+                    "path": str(path),
+                    "line_index": line_number,
+                })
+                self.search_results.addItem(item)
+                count += 1
+                if count == limit:
+                    self.status.setText(f"Showing the first {limit} matches.")
+                    self.side_tabs.setCurrentWidget(self.search_results.parentWidget())
+                    return
+
+        self.status.setText(f"Found {count} match(es) in {len(self.log_files)} log file(s).")
+        self.side_tabs.setCurrentWidget(self.search_results.parentWidget())
+
     def render_log(self):
+        old_source = None
+        old_block = self.log_output.textCursor().blockNumber() - self.FIRST_LOG_BLOCK
+        if 0 <= old_block < len(self.displayed_lines):
+            old_source = self.displayed_lines[old_block]["source"]
+        scroll_position = self.log_output.verticalScrollBar().value()
+
         search = self.search_box.text()
         selected_level = self.level_filter.currentText()
         search_mode = self.search_mode.currentText()
@@ -468,21 +705,9 @@ class LogViewer(QMainWindow):
             search, search_mode, case_sensitive, search_pattern
         )
 
-        def matches_search(line):
-            if not search:
-                return True
-            if search_mode == "Regular expression":
-                return bool(search_pattern.search(line))
-
-            comparable_line = line if case_sensitive else line.lower()
-            comparable_search = search if case_sensitive else search.lower()
-            if search_mode == "Exact line":
-                return comparable_line.rstrip("\r\n") == comparable_search
-            return comparable_search in comparable_line
-
         entries = [
             (index, line) for index, line in enumerate(self.current_lines)
-            if matches_search(line)
+            if matches(line, search, search_mode, case_sensitive, search_pattern)
             and (selected_level == "All" or selected_level in line)
         ]
         if self.error_summary_toggle.isChecked():
@@ -498,9 +723,33 @@ class LogViewer(QMainWindow):
             header = "ERROR SUMMARY (turn off Error summary to view full log)"
             self.displayed_lines = []
         else:
-            log_text = "".join(line for _, line in entries)
             header = "START OF LOG"
-            self.displayed_lines = [index for index, _ in entries]
+            shown_lines = []
+            self.displayed_lines = []
+            fold_stacks = self.fold_stacks.isChecked() and not search and selected_level == "All"
+            entry = 0
+            while entry < len(entries):
+                source_index, line = entries[entry]
+                end = self.stack_blocks.get(source_index)
+                if fold_stacks and end and source_index not in self.expanded_stacks:
+                    title = line.rstrip("\r\n")
+                    shown_lines.append(f"{title} ({end - source_index} lines) ▼\n")
+                    self.displayed_lines.append({"source": source_index, "fold": source_index})
+                    entry += end - source_index
+                    continue
+
+                if fold_stacks and end:
+                    title = line.rstrip("\r\n")
+                    shown_lines.append(f"{title} ▲\n")
+                    self.displayed_lines.append({"source": source_index, "fold": source_index})
+                    entry += 1
+                    continue
+
+                shown_lines.append(line)
+                fold_start = source_index if end else None
+                self.displayed_lines.append({"source": source_index, "fold": fold_start})
+                entry += 1
+            log_text = "".join(shown_lines)
         if log_text and not log_text.endswith("\n"):
             log_text += "\n"
         footer = "END OF SUMMARY" if self.error_summary_toggle.isChecked() else "END OF LOG"
@@ -509,7 +758,15 @@ class LogViewer(QMainWindow):
             f"{log_text}"
             f"\n<=========\n{footer}\n==========>"
         )
-        self.log_output.moveCursor(QTextCursor.MoveOperation.Start)
+        if old_source is not None:
+            for index, block in enumerate(self.displayed_lines):
+                if block["source"] == old_source:
+                    cursor = QTextCursor(
+                        self.log_output.document().findBlockByNumber(index + self.FIRST_LOG_BLOCK)
+                    )
+                    self.log_output.setTextCursor(cursor)
+                    break
+        self.log_output.verticalScrollBar().setValue(scroll_position)
         self.status.setText(f"Loaded {len(self.current_lines)} lines.")
         self.loading_indicator.hide()
         self.jump_to_bookmark()
@@ -517,7 +774,7 @@ class LogViewer(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 10))
-    app.setWindowIcon(QIcon(str(asset_path("minecraft-log-viewer.ico"))))
+    app.setWindowIcon(QIcon(str(asset_path("log-viewer.ico"))))
 
     app.setStyleSheet("""
         QWidget {

@@ -1,18 +1,34 @@
 # Log Viewer
 
-A desktop viewer for `.log`, `.txt`, and `.gz` log files. It supports level filters, text and regular-expression search, highlighted matches, error summaries, and session bookmarks.
+A simple log viewer built with PySide6.
 
-## Run locally
+Originally made for searching through Minecraft server logs, but it works with any `.log`, `.txt`, or compressed `.gz` log file.
+
+The goal was to make digging through large logs quicker than using a text editor, with built-in filtering, searching, and bookmarking.
+
+## Features
+
+* Search by text or regular expression
+* Filter by log level
+* Highlight matching results
+* Error summary mode
+* Line bookmarks
+* Debugging timeline for server events, warnings, and failures
+* Collapsible Java stack traces
+* Search across all loaded log files
+* Supports `.log`, `.txt`, and `.gz` files
+
+## Download
+
+Download the latest executable from the [latest release page](../../releases/latest).
+
+## Running from Source
 
 ```powershell
 python -m pip install -r requirements.txt
 python log_viewer.py
 ```
 
-## Build a Windows executable
+## Why?
 
-```powershell
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name "Log Viewer" --icon minecraft-log-viewer.ico --add-data "minecraft-log-viewer.ico;." log_viewer.py
-```
-
-The executable is written to `dist/`. Build output is intentionally excluded from Git.
+This project was originally created to make it easier to investigate Minecraft server issues without manually digging through thousands of lines in a text editor. Features such as error summaries, timelines, stack trace folding, and multi-log search are designed to help surface important information more quickly.
