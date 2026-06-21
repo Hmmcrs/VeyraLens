@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller output
+build/
+dist/
+*.spec
+
+# Generated icon work files
+terminal-log-viewer*.png
+
+# Editor settings
+.vscode/
+.idea/
