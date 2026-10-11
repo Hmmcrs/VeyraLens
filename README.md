@@ -1,4 +1,4 @@
-# Nayvera Lens
+# VeyraLens
 
 A simple log viewer built with PySide6.
 
