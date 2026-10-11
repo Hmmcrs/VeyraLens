@@ -11,6 +11,7 @@ The goal was to make digging through large logs quicker than using a text editor
 * Search by text or regular expression
 * Filter by log level
 * Highlight matching results
+* Log specific annotations
 * Error summary mode
 * Line bookmarks
 * Debugging timeline for server events, warnings, and failures
