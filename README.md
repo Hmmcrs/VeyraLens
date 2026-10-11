@@ -1,4 +1,4 @@
-# Log Viewer
+# Nayvera Lens
 
 A simple log viewer built with PySide6.
 
@@ -28,7 +28,3 @@ Download the latest executable from the [latest release page](../../releases/lat
 python -m pip install -r requirements.txt
 python log_viewer.py
 ```
-
-## Why?
-
-This project was originally created to make it easier to investigate Minecraft server issues without manually digging through thousands of lines in a text editor. Features such as error summaries, timelines, stack trace folding, and multi-log search are designed to help surface important information more quickly.
